@@ -29,6 +29,9 @@ Wiring Diagram:
 ![image](https://github.com/user-attachments/assets/c61f3752-e425-4892-a899-5959e329fccd)
 
 
+Link to Video: 
+https://youtu.be/l-LC4amEOqI
+
 
 
 
