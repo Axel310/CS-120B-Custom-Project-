@@ -1,6 +1,6 @@
-                          # CS-120B-Custom-Project-
-            Custom Laboratory Project for CS-EE120B Embedded Systems 
-                          Title: "The Scary Maze Game" 
+			                          # CS-120B-Custom-Project-
+           				 Custom Laboratory Project for CS-EE120B Embedded Systems 
+                     			           Title: "The Scary Maze Game" 
 
 Description: 
   The scary maze game is a two-dimensional game where the player controls an in-game character, where they will use a joystick to navigate from left to right, up and down to complete the maze. If the user fails to complete the maze, the user will be jumpscared by a sprite and message and will be forced to restart the maze. However, if the user completes the maze, the display will upload another happy sprite with a message followed.
