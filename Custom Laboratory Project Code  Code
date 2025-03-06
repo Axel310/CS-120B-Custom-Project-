@@ -1,0 +1,997 @@
+#include <avr/io.h>
+#include <util/delay.h>
+#include "timerISR.h"
+#include "helper.h"
+#include "periph.h"
+#include "helper.h"
+#include "spiAVR.h"
+
+
+
+
+ 
+// Pin Definitions
+#define CS_PIN   PB2
+#define RST_PIN  PB0
+#define RS_PIN   PB1
+#define SDA_PIN  PB3
+#define SCK_PIN  PB5
+#define FONT_SIZE 95 // Characters from 32 to 126
+#define SetBit(port, pin, value) ((value) ? ((port) |= (1 << (pin))) : ((port) &= ~(1 << (pin))))
+
+#define MENU_START 0
+#define MENU_EXIT 1
+
+#define BUTTON_PC3 (1 << PC3) // Define the button on PC3
+
+#define CELL_SIZE 10
+#define GRID_OFFSET_X(cols) ((128 - (CELL_SIZE * (cols))) / 2)
+#define GRID_OFFSET_Y(rows) ((160 - (CELL_SIZE * (rows))) / 2)
+
+// Notes for haunting, lower-pitched melody
+#define NOTE_C1  33
+#define NOTE_D1  37
+#define NOTE_E1  41
+#define NOTE_F1  44
+#define NOTE_G1  49
+#define NOTE_A1  55
+#define NOTE_B1  62
+#define NOTE_C2  65
+#define NOTE_D2  73
+#define NOTE_E2  82
+#define NOTE_F2  87
+#define NOTE_G2  98
+#define NOTE_A2  110
+#define NOTE_B2  123
+#define NOTE_C3  131
+#define NOTE_D3  147
+#define NOTE_E3  165
+#define NOTE_F3  175
+#define NOTE_G3  196
+#define NOTE_A3  220
+#define NOTE_B3  247
+#define NOTE_REST 0
+
+
+
+#define BASE_NOTE_DURATION_NORMAL 25
+#define BASE_NOTE_DURATION_SLOW 50
+
+
+#define NUM_TASKS 5//TODO: Change to the number of tasks being used
+
+#define BASE_NOTE_DURATION 15 // Quarter note duration in milliseconds
+
+
+
+//Task struct for concurrent synchSMs implmentations
+typedef struct _task{
+	signed 	 char state; 		//Task's current state
+	unsigned long period; 		//Task period
+	unsigned long elapsedTime; 	//Time elapsed since last task tick
+	int (*TickFct)(int); 		//Task tick function
+} task;
+
+//global variables 
+unsigned char currentMenuOption = MENU_START;
+volatile uint8_t isDisplayOn = 1; // Track whether the display is on or off
+const uint8_t rows = 16;
+const uint8_t cols = 12;
+volatile uint8_t isGameRunning = 0; // 0 = Menu, 1 = Maze
+
+volatile uint8_t row = 15; // Global row variable
+volatile uint8_t col = 1;  // Global column variable
+
+volatile uint8_t playingSound = 0;   // 1 = Playing a sound, 0 = No sound
+volatile uint8_t soundType = 0;     // 0 = None, 1 = Jumpscare, 2 = Winning
+
+
+
+
+//TODO: Define Periods for each task
+// e.g. const unsined long TASK1_PERIOD = <PERIOD>
+
+const unsigned long TASK1_PERIOD = 100;
+const unsigned long TASK2_PERIOD = 150;
+const unsigned long TASK3_PERIOD = 50;
+const unsigned long TASK4_PERIOD = 10;
+
+const unsigned long GCD_PERIOD = 10;//TODO:Set the GCD Period
+
+task tasks[NUM_TASKS]; // declared task array with 5 tasks
+
+//TODO: Declare your tasks' function and their states here
+
+void TimerISR() {
+	for ( unsigned int i = 0; i < NUM_TASKS; i++ ) {                   // Iterate through each task in the task array
+		if ( tasks[i].elapsedTime == tasks[i].period ) {           // Check if the task is ready to tick
+			tasks[i].state = tasks[i].TickFct(tasks[i].state); // Tick and set the next state for this task
+			tasks[i].elapsedTime = 0;                          // Reset the elapsed time for the next tick
+		}
+		tasks[i].elapsedTime += GCD_PERIOD;                        // Increment the elapsed time by GCD_PERIOD
+	}
+}
+
+const uint8_t font[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, // Space
+    0x00, 0x00, 0x5F, 0x00, 0x00, // !
+    0x00, 0x07, 0x00, 0x07, 0x00, // "
+    0x14, 0x7F, 0x14, 0x7F, 0x14, // #
+    0x24, 0x2A, 0x7F, 0x2A, 0x12, // $
+    0x23, 0x13, 0x08, 0x64, 0x62, // %
+    0x36, 0x49, 0x55, 0x22, 0x50, // &
+    0x00, 0x05, 0x03, 0x00, 0x00, // '
+    0x00, 0x1C, 0x22, 0x41, 0x00, // (
+    0x00, 0x41, 0x22, 0x1C, 0x00, // )
+    0x14, 0x08, 0x3E, 0x08, 0x14, // *
+    0x08, 0x08, 0x3E, 0x08, 0x08, // +
+    0x00, 0x50, 0x30, 0x00, 0x00, // ,
+    0x08, 0x08, 0x08, 0x08, 0x08, // -
+    0x00, 0x60, 0x60, 0x00, 0x00, // .
+    0x20, 0x10, 0x08, 0x04, 0x02, // /
+
+    // Numbers
+    0x3E, 0x51, 0x49, 0x45, 0x3E, // 0
+    0x00, 0x42, 0x7F, 0x40, 0x00, // 1
+    0x42, 0x61, 0x51, 0x49, 0x46, // 2
+    0x21, 0x41, 0x45, 0x4B, 0x31, // 3
+    0x18, 0x14, 0x12, 0x7F, 0x10, // 4
+    0x27, 0x45, 0x45, 0x45, 0x39, // 5
+    0x3C, 0x4A, 0x49, 0x49, 0x30, // 6
+    0x01, 0x71, 0x09, 0x05, 0x03, // 7
+    0x36, 0x49, 0x49, 0x49, 0x36, // 8
+    0x06, 0x49, 0x49, 0x29, 0x1E, // 9
+
+};
+
+const uint8_t font_AZ[] = {
+    // A
+    0x1E, 0x05, 0x05, 0x05, 0x1E,
+    // B
+    0x1F, 0x15, 0x15, 0x15, 0x0A,
+    // C
+    0x0E, 0x11, 0x11, 0x11, 0x11,
+    // D
+    0x1F, 0x11, 0x11, 0x11, 0x0E,
+    // E
+    0x1F, 0x15, 0x15, 0x15, 0x11,
+    // F
+    0x1F, 0x05, 0x05, 0x05, 0x01,
+    // G
+    0x0E, 0x11, 0x11, 0x15, 0x1D,
+    // H
+    0x1F, 0x04, 0x04, 0x04, 0x1F,
+    // I
+    0x00, 0x11, 0x1F, 0x11, 0x00,
+    // J
+    0x08, 0x10, 0x10, 0x10, 0x0F,
+    // K
+    0x1F, 0x04, 0x04, 0x0A, 0x11,
+    // L
+    0x1F, 0x10, 0x10, 0x10, 0x10,
+    // M
+    0x1F, 0x02, 0x04, 0x02, 0x1F,
+    // N
+    0x1F, 0x02, 0x04, 0x08, 0x1F,
+    // O
+    0x0E, 0x11, 0x11, 0x11, 0x0E,
+    // P
+    0x1F, 0x05, 0x05, 0x05, 0x02,
+    // Q
+    0x0E, 0x11, 0x11, 0x19, 0x1E,
+    // R
+    0x1F, 0x05, 0x05, 0x0D, 0x12,
+    // S
+    0x12, 0x15, 0x15, 0x15, 0x09,
+    // T
+    0x01, 0x01, 0x1F, 0x01, 0x01,
+    // U
+    0x0F, 0x10, 0x10, 0x10, 0x0F,
+    // V
+    0x07, 0x08, 0x10, 0x08, 0x07,
+    // W
+    0x1F, 0x08, 0x04, 0x08, 0x1F,
+    // X
+    0x11, 0x0A, 0x04, 0x0A, 0x11,
+    // Y
+    0x01, 0x02, 0x1C, 0x02, 0x01,
+    // Z
+    0x11, 0x19, 0x15, 0x13, 0x11
+};
+
+
+uint8_t maze[16][12] = {
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, // Row 0
+    {1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1}, // Row 1 (End point at (1, 10))
+    {1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1}, // Row 2
+    {1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1}, // Row 3
+    {1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1}, // Row 4
+    {1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1}, // Row 5
+    {1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1}, // Row 6
+    {1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1}, // Row 7
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1}, // Row 8
+    {1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1}, // Row 9
+    {1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1}, // Row 10
+    {1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1}, // Row 11
+    {1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1}, // Row 12
+    {1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1}, // Row 13
+    {1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1}, // Row 14
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}  // Row 15 (Start point at (15, 1))
+};
+
+const uint16_t smileyFace[16][16] = {
+    {0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000},
+    {0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000},
+};
+
+const uint16_t scaryFace[16][16] = {
+    {0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xF800, 0xF800, 0xFFFF, 0xFFFF, 0xF800, 0xF800, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000},
+    {0x0000, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0x0000},
+    {0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000},
+    {0x0000, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF},
+    {0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF},
+    {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+    {0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0x0000},
+};
+
+
+// haunting melody for suspense
+
+const uint16_t hauntingMelody[] = {
+    NOTE_C2, NOTE_D2, NOTE_E2, NOTE_REST, // Step up
+    NOTE_E2, NOTE_D2, NOTE_C2, NOTE_REST, // Step down
+    NOTE_C2, NOTE_D2, NOTE_E2, NOTE_REST, // Tension
+    NOTE_E2, NOTE_D2, NOTE_C2, NOTE_REST  // Resolve
+};
+
+const uint8_t hauntingDurations[] = {
+    8, 8, 8, 8, // Step up
+    8, 8, 8, 8, // Step down
+    8, 8, 8, 8, // Tension
+    8, 8, 8, 8  // Resolve
+};
+
+// Jumpscare sound: sharp and short pattern
+const uint16_t jumpscareSound[] = {
+    NOTE_C3, NOTE_B2, NOTE_C3, NOTE_D3, NOTE_E3
+};
+
+const uint8_t jumpscareDurations[] = {
+    4, 4, 4, 4, 8
+};
+
+// Winning melody: uplifting and simple
+const uint16_t winSound[] = {
+    NOTE_C2, NOTE_E2, NOTE_G2, NOTE_C3, NOTE_REST
+};
+
+const uint8_t winDurations[] = {
+    8, 8, 8, 8, 12
+};
+
+//passive buzzer different notes (initialize timer for buzzer)
+void Timer0_Init() {
+    TCCR0A = (1 << WGM01) | (1 << COM0A0); // CTC mode, toggle OC0A on compare match
+    TCCR0B = (1 << CS01);                  // Prescaler 8
+    OCR0A = 0;                             // Initialize compare value
+    DDRD |= (1 << PD6);                    // Set PD6 (OC0A) as output
+}
+
+
+
+void Play_Note_PD6(uint16_t frequency) {
+    if (frequency == NOTE_REST) {
+        TCCR0A &= ~(1 << COM0A0); // Disable output on OC0A
+        OCR0A = 0;
+        return;
+    }
+    TCCR0A |= (1 << COM0A0); // Enable output on OC0A
+    OCR0A = (F_CPU / (8 * 2 * frequency)) - 1; // Calculate compare value for the frequency
+}
+
+
+// SPI Send Function
+void SPI_send(uint8_t data) {
+    SPDR = data; // Load data into SPI Data Register
+    while (!(SPSR & (1 << SPIF))); // Wait for transmission to complete
+}
+
+// Hardware Reset Function
+void HardwareReset() {
+    SetBit(PORTB, RST_PIN, 0); // Pull RST pin LOW
+    _delay_ms(200);
+    SetBit(PORTB, RST_PIN, 1); // Pull RST pin HIGH
+    _delay_ms(200);
+}
+
+// Send Command Function
+void Send_Command(uint8_t cmd) {
+    SetBit(PORTB, CS_PIN, 0); // CS = 0 (Select LCD)
+    SetBit(PORTB, RS_PIN, 0); // RS = 0 (Command mode)
+    SPI_send(cmd);            // Send command
+    SetBit(PORTB, CS_PIN, 1); // CS = 1 (Deselect LCD)
+}
+
+// Send Data Function
+void Send_Data(uint8_t data) {
+    SetBit(PORTB, CS_PIN, 0); // CS = 0 (Select LCD)
+    SetBit(PORTB, RS_PIN, 1); // RS = 1 (Data mode)
+    SPI_send(data);           // Send data
+    SetBit(PORTB, CS_PIN, 1); // CS = 1 (Deselect LCD)
+}
+
+// LCD Initialization Function
+void LCD_Init() {
+    HardwareReset(); // Perform hardware reset
+
+    // Initialization sequence
+    Send_Command(0x01); // SWRESET
+    _delay_ms(150);
+    Send_Command(0x11); // SLPOUT
+    _delay_ms(200);
+    Send_Command(0x36); // MADCTL (Memory Access Control)
+    Send_Data(0xC0);    // Default orientation (change as needed)
+
+    Send_Command(0x3A); // COLMOD (Pixel Format Set)
+    Send_Data(0x05);    // RGB565 (16-bit color)
+
+    Send_Command(0x29); // DISPON
+    _delay_ms(200);
+}
+
+void Set_Address_Window(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_end) {
+    // Set Column Address
+    Send_Command(0x2A); // CASET
+    Send_Data(x_start >> 8); // High byte of X start
+    Send_Data(x_start & 0xFF); // Low byte of X start
+    Send_Data(x_end >> 8); // High byte of X end
+    Send_Data(x_end & 0xFF); // Low byte of X end
+
+    // Set Row Address
+    Send_Command(0x2B); // RASET
+    Send_Data(y_start >> 8); // High byte of Y start
+    Send_Data(y_start & 0xFF); // Low byte of Y start
+    Send_Data(y_end >> 8); // High byte of Y end
+    Send_Data(y_end & 0xFF); // Low byte of Y end
+
+    // Ready for Memory Write
+    Send_Command(0x2C); // RAMWR
+}
+
+void Draw_Pixel(uint8_t x, uint8_t y, uint16_t color) {
+    // Bounds check to prevent drawing outside the screen
+    if (x >= 128 || y >= 160) return;
+
+    // Set the address window to the pixel location
+    Send_Command(0x2A); // CASET
+    Send_Data(0x00);    // x-start high byte
+    Send_Data(x);       // x-start low byte
+    Send_Data(0x00);    // x-end high byte
+    Send_Data(x);       // x-end low byte
+
+    Send_Command(0x2B); // RASET
+    Send_Data(0x00);    // y-start high byte
+    Send_Data(y);       // y-start low byte
+    Send_Data(0x00);    // y-end high byte
+    Send_Data(y);       // y-end low byte
+
+    // Write the pixel color to memory
+    Send_Command(0x2C); // RAMWR
+    Send_Data(color >> 8); // High byte of color
+    Send_Data(color & 0xFF); // Low byte of color
+}
+
+void ST7735_drawChar(uint8_t x, uint8_t y, char c, uint16_t color, uint16_t bg) {
+    const uint8_t *charBitmap = nullptr; // Pointer to the character bitmap
+
+    // Choose the appropriate font array
+    if (c >= 65 && c <= 90) { // A-Z
+        charBitmap = &font_AZ[(c - 65) * 5];
+    } else if (c >= 32 && c <= 126) { // Space and printable ASCII
+        charBitmap = &font[(c - 32) * 5];
+    } else {
+        return; // Unsupported character
+    }
+
+    // Render the character from the selected font
+    for (uint8_t i = 0; i < 5; i++) {
+        uint8_t line = charBitmap[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (line & 0x01) {
+                Draw_Pixel(x + i, y + j, color); // Draw foreground pixel
+            } else {
+                Draw_Pixel(x + i, y + j, bg);    // Draw background pixel
+            }
+            line >>= 1;
+        }
+    }
+
+    // Add a spacing column
+    for (uint8_t j = 0; j < 8; j++) {
+        Draw_Pixel(x + 5, y + j, bg);
+    }
+}
+
+
+
+void ST7735_drawText(uint8_t x, uint8_t y, const char *text, uint16_t color, uint16_t bg) {
+    while (*text) {
+        char c = *text++;
+
+        // Skip unsupported characters
+        if (!((c >= 65 && c <= 90) || (c >= 32 && c <= 126))) {
+            continue;
+        }
+
+        // Check if text exceeds the screen width
+        if (x + 6 > 128) {
+            x = 0;      // Reset x to the beginning of the line
+            y += 10;    // Move to the next line (adjust as needed for character height)
+        }
+
+        // If text exceeds the screen height, stop rendering
+        if (y + 8 > 160) break;
+
+        // Draw the character and update x position
+        ST7735_drawChar(x, y, c, color, bg);
+        x += 6; // Advance x position (5 pixels for character width + 1 for spacing)
+    }
+}
+
+
+void Fill_Screen(uint16_t color) {
+    Set_Address_Window(0, 127, 0, 159); // Use the full screen dimensions
+    for (uint32_t i = 0; i < 128 * 160; i++) {
+        Send_Data(color >> 8); // High byte
+        Send_Data(color & 0xFF); // Low byte
+    }
+}
+
+
+void displayMenu() {
+Fill_Screen(0x0000); // Clear screen
+ST7735_drawText(10, 10, "       MENU", 0xFFFF, 0x0000); // Test a single line of text
+ST7735_drawText(10, 30, "*START GAME*", 0x07E0, 0x0000); // Green text
+ST7735_drawText(10, 50, "*EXIT GAME*", 0xF800, 0x0000); // Red text
+
+}
+
+
+void UpdateMenuDisplay() {
+    Fill_Screen(0x0000); // Clear screen
+
+    if (currentMenuOption == MENU_START) {
+        ST7735_drawText(10, 10, "       MENU", 0xFFFF, 0x0000); // Title
+        ST7735_drawText(10, 30, "#  START GAME", 0x07E0, 0x0000); // Highlighted option
+        ST7735_drawText(10, 50, "   EXIT GAME", 0xF800, 0x0000); // Normal option
+    } else if (currentMenuOption == MENU_EXIT) {
+        ST7735_drawText(10, 10, "       MENU", 0xFFFF, 0x0000); // Title
+        ST7735_drawText(10, 30, "   START GAME", 0x07E0, 0x0000); // Normal option
+        ST7735_drawText(10, 50, "#  EXIT GAME", 0xF800, 0x0000); // Highlighted option
+    }
+}
+
+void drawMaze(uint8_t maze[16][12], uint8_t rows, uint8_t cols) {
+    for (uint8_t i = 0; i < rows; i++) {
+        for (uint8_t j = 0; j < cols; j++) {
+            uint16_t color = (maze[i][j] == 1) ? 0xFFFF : 0x0000; // White for walls, Black for paths
+            uint8_t x_start = GRID_OFFSET_X(cols) + (j * CELL_SIZE);
+            uint8_t y_start = GRID_OFFSET_Y(rows) + (i * CELL_SIZE);
+
+            // Draw each cell as a rectangle
+            for (uint8_t y = 0; y < CELL_SIZE; y++) {
+                for (uint8_t x = 0; x < CELL_SIZE; x++) {
+                    Draw_Pixel(x_start + x, y_start + y, color);
+                }
+            }
+        }
+    }
+}
+
+
+void drawDot(uint8_t row, uint8_t col, uint16_t color, uint8_t rows, uint8_t cols) {
+    uint8_t x_start = GRID_OFFSET_X(cols) + (col * CELL_SIZE);
+    uint8_t y_start = GRID_OFFSET_Y(rows) + (row * CELL_SIZE);
+
+    // Draw the dot as a filled rectangle in the cell
+    for (uint8_t y = 2; y < CELL_SIZE - 2; y++) {
+        for (uint8_t x = 2; x < CELL_SIZE - 2; x++) {
+            Draw_Pixel(x_start + x, y_start + y, color);
+        }
+    }
+}
+
+void drawSprite(uint8_t x_start, uint8_t y_start, const uint16_t sprite[16][16], uint8_t scale) {
+    for (uint8_t y = 0; y < 16; y++) {
+        for (uint8_t x = 0; x < 16; x++) {
+            uint16_t color = sprite[y][x];
+            for (uint8_t dy = 0; dy < scale; dy++) {
+                for (uint8_t dx = 0; dx < scale; dx++) {
+                    uint8_t pixel_x = x_start + (x * scale) + dx;
+                    uint8_t pixel_y = y_start + (y * scale) + dy;
+
+                    // Check if the pixel is within bounds
+                    if (pixel_x < 128 && pixel_y < 160) {
+                        Draw_Pixel(pixel_x, pixel_y, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+
+static uint8_t gameReset = 0;
+static uint8_t noteIndex = 0;
+
+void moveDot(uint8_t *row, uint8_t *col, int8_t direction, uint8_t rows, uint8_t cols) {
+    if (gameReset) {
+        gameReset = 0; // Clear the reset flag for subsequent moves
+        return;
+    }
+
+    uint8_t new_row = *row;
+    uint8_t new_col = *col;
+
+    // Update position based on direction
+    switch (direction) {
+        case 0: new_row--; break; // Up
+        case 1: new_row++; break; // Down
+        case 2: new_col--; break; // Left
+        case 3: new_col++; break; // Right
+    }
+
+    // Check for collisions or boundaries
+    if (new_row >= rows || new_col >= cols || maze[new_row][new_col] == 1) {
+        // Jumpscare logic (hit a wall)
+        Fill_Screen(0x0000); // Clear the screen
+        drawSprite(32, 48, scaryFace, 4); // Display scary face
+        ST7735_drawText(30, 120, "YOU DIED!!!", 0xFFFF, 0x0000); // Add text
+        isGameRunning = 0; // Return to menu
+
+        // Trigger the jumpscare sound
+        playingSound = 1;
+        soundType = 1;
+    } else if (new_row == 1 && new_col == 10) {
+        // Winning condition
+        Fill_Screen(0x0000); // Clear the screen
+        drawSprite(32, 48, smileyFace, 4); // Display happy face
+        ST7735_drawText(30, 120, "YOU SURVIVED!!!", 0xFFFF, 0x0000); // Add text
+        isGameRunning = 0; // Return to menu
+
+        // Trigger the winning sound
+        playingSound = 1;
+        soundType = 2;
+    } else {
+        // Valid move
+        drawDot(*row, *col, 0x0000, rows, cols); // Erase the previous dot
+        *row = new_row;
+        *col = new_col;
+        drawDot(*row, *col, 0xF800, rows, cols); // Draw the new dot
+    }
+}
+
+
+
+void resetGame() {
+    // Reset game state
+    isGameRunning = 1;  // Game is running
+    row = 15;           // Reset to starting row
+    col = 1;            // Reset to starting column
+    gameReset = 1;      // Mark game as reset
+
+    // Clear the screen and redraw everything
+    Fill_Screen(0x0000);        // Clear screen
+    drawMaze(maze, 16, 12);     // Draw the maze
+    drawDot(row, col, 0xF800, 16, 12); // Draw the dot at the starting position
+}
+
+
+
+void HandleJoystickInput() {
+    static uint8_t debounce = 0; // Debounce counter
+
+    if (debounce) {
+        debounce--;
+        return; // Skip if still debouncing
+    }
+
+    uint16_t vrx = ADC_read(0); // Read x-axis (PC0)
+    uint16_t vry = ADC_read(1); // Read y-axis (PC1)
+    uint8_t sw = !(PINC & (1 << PC2)); // Read switch (active low)
+
+    if (!isGameRunning) {
+        // Handle menu navigation
+        if (vry > 800) { // Joystick moved up
+            if (currentMenuOption > MENU_START) {
+                currentMenuOption--;
+                debounce = 10; // Add debounce
+                UpdateMenuDisplay(); // Redraw menu with updated option
+            }
+        } else if (vry < 200) { // Joystick moved down
+            if (currentMenuOption < MENU_EXIT) {
+                currentMenuOption++;
+                debounce = 10; // Add debounce
+                UpdateMenuDisplay(); // Redraw menu with updated option
+            }
+        }
+
+        // Only start the game if the joystick button is pressed and "Start Game" is selected
+        if (sw) { // Joystick button pressed
+            debounce = 20; // Debounce for button press
+            if (currentMenuOption == MENU_START) {
+                resetGame(); // Start the game only when "Start Game" is selected
+            } else if (currentMenuOption == MENU_EXIT) {
+                Fill_Screen(0x0000); // Clear screen for exit message
+                ST7735_drawText(30, 70, "EXITING", 0xFFFF, 0x0000);
+                isDisplayOn = 0; // Turn off the display
+            }
+        }
+    } else {
+        // Handle maze movement
+        if (vry > 800) { // Move up
+            moveDot(&row, &col, 0, 16, 12);
+        } else if (vry < 200) { // Move down
+            moveDot(&row, &col, 1, 16, 12);
+        } else if (vrx > 800) { // Move right
+            moveDot(&row, &col, 3, 16, 12);
+        } else if (vrx < 200) { // Move left
+            moveDot(&row, &col, 2, 16, 12);
+        }
+
+        if (sw) { // Restart the game
+            debounce = 20; // Debounce for button press
+            resetGame();   // Call the reset function
+        }
+    }
+}
+
+
+
+
+enum DisplayStates { DISP_INIT, DISP_MENU };
+
+int DisplayTick(int state) {
+    switch (state) {
+        case DISP_INIT:
+            if (isDisplayOn) {
+                LCD_Init();
+                Fill_Screen(0x0000); // Clear the screen
+                displayMenu();      // Display the menu
+                UpdateMenuDisplay(); // Update the menu display
+                state = DISP_MENU;
+            }
+            break;
+
+        case DISP_MENU:
+            if (!isDisplayOn) {
+                state = DISP_INIT; // Reset to init if the display is turned off
+            }
+            break;
+
+        default:
+            state = DISP_INIT;
+            break;
+    }
+
+    return state;
+}
+
+
+
+enum JoystickStates { JOYSTICK_INIT, JOYSTICK_IDLE, JOYSTICK_NAVIGATE, JOYSTICK_SELECT };
+
+int JoystickTick(int state) {
+    static uint8_t debounce = 0; // Debounce counter
+
+    uint16_t vry = ADC_read(0); // Read y-axis (PC1)
+    uint16_t vrx = ADC_read(1); // Read x-axis (PC0)
+    uint8_t sw = !(PINC & (1 << PC2)); // Read switch (active low)
+
+    switch (state) {
+        case JOYSTICK_INIT:
+            state = JOYSTICK_IDLE;
+            break;
+
+        case JOYSTICK_IDLE:
+            if (!isGameRunning) {
+                HandleJoystickInput(); // Handle menu navigation
+                break;
+            }
+            if ((vry > 800 || vry < 200 || vrx > 800 || vrx < 200) && debounce == 0) {
+                state = JOYSTICK_NAVIGATE;
+            }
+            break;
+
+        case JOYSTICK_NAVIGATE:
+            if (isGameRunning) {
+                if (vry > 800 && debounce == 0) {
+                    moveDot(&row, &col, 0, rows, cols); // Move up
+                } else if (vry < 200 && debounce == 0) {
+                    moveDot(&row, &col, 1, rows, cols); // Move down
+                } else if (vrx > 800 && debounce == 0) {
+                    moveDot(&row, &col, 3, rows, cols); // Move right
+                } else if (vrx < 200 && debounce == 0) {
+                    moveDot(&row, &col, 2, rows, cols); // Move left
+                }
+                debounce = 10; // Add debounce delay
+            }
+            state = JOYSTICK_IDLE;
+            break;
+
+        default:
+            state = JOYSTICK_INIT;
+            break;
+    }
+
+    // Debounce logic
+    if (debounce > 0) {
+        debounce--;
+    }
+
+    return state;
+}
+
+
+enum ButtonStates { BUTTON_INIT, BUTTON_WAIT, BUTTON_PRESSED, BUTTON_DISPLAY_OFF };
+
+int ButtonTick(int state) {
+    static uint8_t debounce = 0;
+    static uint16_t offCounter = 0; // Counter for "SYSTEM OFF" message
+
+    switch (state) {
+        case BUTTON_INIT:
+            state = BUTTON_WAIT;
+            debounce = 0;
+            offCounter = 0;
+            isDisplayOn = 0; // Ensure the display is initially off
+            isGameRunning = 0; // Reset game state
+            Fill_Screen(0x0000); // Clear the display to black
+            break;
+
+        case BUTTON_WAIT:
+            if (!(PINC & BUTTON_PC3)) { // Button is pressed (active low)
+                state = BUTTON_PRESSED;
+                debounce = 20; // Set debounce duration
+            }
+            break;
+
+        case BUTTON_PRESSED:
+            if (debounce > 0) {
+                debounce--; // Wait for debounce to complete
+            } else if (PINC & BUTTON_PC3) { // Button is released
+                isDisplayOn = !isDisplayOn; // Toggle the display state
+                if (isDisplayOn) {
+                    LCD_Init();          // Initialize the display
+                    displayMenu();       // Show the menu
+                    UpdateMenuDisplay(); // Update the menu display
+                } else {
+                    Fill_Screen(0x0000); // Clear the screen
+                    isGameRunning = 0;  // Reset the game state
+                    row = 15;           // Reset player position
+                    col = 1;
+                    ST7735_drawText(20, 70, "SYSTEM OFF", 0xFFFF, 0x0000); // Display "SYSTEM OFF" message
+                    offCounter = 0; // Reset counter for the off delay
+                    state = BUTTON_DISPLAY_OFF;
+                }
+            }
+            break;
+
+        case BUTTON_DISPLAY_OFF:
+            offCounter++; // Increment the counter
+            if (offCounter >= 40) { // 40 * 50 ms (GCD_PERIOD) = 2000 ms
+                Fill_Screen(0x0000); // Turn off the display (black screen)
+                state = BUTTON_WAIT; // Return to waiting state
+            }
+            break;
+
+        default:
+            state = BUTTON_INIT;
+            break;
+    }
+
+    return state;
+}
+
+enum BuzzerStates { BUZZER_IDLE, BUZZER_PLAY };
+
+int BuzzerTick(int state) {
+    static uint8_t noteIndex = 0;
+    static uint16_t noteDurationCounter = 0;
+    static uint16_t currentBaseDuration = BASE_NOTE_DURATION_NORMAL;
+
+    switch (state) {
+        case BUZZER_IDLE:
+            if (isGameRunning) {
+                state = BUZZER_PLAY;
+                noteIndex = 0;
+                noteDurationCounter = 0;
+            }
+            break;
+
+        case BUZZER_PLAY:
+            if (!isGameRunning) {
+                state = BUZZER_IDLE;
+                Play_Note_PD6(NOTE_REST); // Turn off the buzzer
+            } else if (noteDurationCounter == 0) {
+                // Play the current note
+               Play_Note_PD6(hauntingMelody[noteIndex]);
+
+             if (noteIndex % 4 == 0) { // Slow down every 4th note
+             currentBaseDuration = BASE_NOTE_DURATION_SLOW;
+            } else {
+            currentBaseDuration = BASE_NOTE_DURATION_NORMAL;
+            }
+                // Adjust duration
+                noteDurationCounter = (hauntingDurations[noteIndex] * BASE_NOTE_DURATION) / GCD_PERIOD;
+
+                // Advance to the next note
+                noteIndex++;
+                if (noteIndex >= sizeof(hauntingMelody) / sizeof(hauntingMelody[0])) {
+                    noteIndex = 0; // Loop back to the start
+                }
+            }
+            break;
+
+        default:
+            state = BUZZER_IDLE;
+            break;
+    }
+
+    if (noteDurationCounter > 0) {
+        noteDurationCounter--; // Decrement the counter
+    }
+
+    return state;
+}
+
+
+
+enum SoundStates { SOUND_IDLE, SOUND_PLAY };
+
+int SoundTick(int state) {
+    static uint8_t noteIndex = 0;
+    static uint16_t noteDurationCounter = 0;
+
+    switch (state) {
+        case SOUND_IDLE:
+            if (playingSound) {
+                state = SOUND_PLAY;
+                noteIndex = 0;
+                noteDurationCounter = 0;
+            }
+            break;
+
+        case SOUND_PLAY:
+            if (noteDurationCounter == 0) {
+                // Select the correct sound sequence
+                const uint16_t *soundArray = (soundType == 1) ? jumpscareSound : winSound;
+                const uint8_t *durationArray = (soundType == 1) ? jumpscareDurations : winDurations;
+                uint8_t soundSize = (soundType == 1)
+                                        ? sizeof(jumpscareSound) / sizeof(jumpscareSound[0])
+                                        : sizeof(winSound) / sizeof(winSound[0]);
+
+                // Play the current note
+                if (noteIndex < soundSize) {
+                    Play_Note_PD6(soundArray[noteIndex]);
+                    noteDurationCounter = (durationArray[noteIndex] * BASE_NOTE_DURATION) / GCD_PERIOD;
+                    noteIndex++;
+                } else {
+                    // End of sound sequence
+                    Play_Note_PD6(NOTE_REST);
+                    playingSound = 0;
+                    soundType = 0;
+                    state = SOUND_IDLE;
+                }
+            } else {
+                noteDurationCounter--; // Decrement duration counter
+            }
+            break;
+
+        default:
+            state = SOUND_IDLE;
+            break;
+    }
+
+    return state;
+}
+
+
+
+//TODO: Create your tick functions for each task
+
+
+
+int main(void) {
+    //TODO: initialize all your inputs and ouputs
+
+    DDRB= 0xFF;
+    PORTB = 0x00;
+
+    DDRC = 0x00;
+    PORTC = 0xFF;
+
+    DDRD = 0xFF;
+    PORTD = 0x00;
+
+
+    ADC_init();   // initializes ADC
+    SPI_INIT();
+    LCD_Init();
+    Timer0_Init();
+
+    displayMenu();
+    UpdateMenuDisplay();
+ 
+    drawDot(rows, cols, 0xF800, 16, 12);
+
+ 
+
+    //TODO: Initialize tasks here
+    // e.g. 
+    // tasks[0].period = ;
+    // tasks[0].state = ;
+    // tasks[0].elapsedTime = ;
+    // tasks[0].TickFct = ;
+
+      tasks[0].period =TASK1_PERIOD ;
+      tasks[0].state = DISP_INIT ;
+      tasks[0].elapsedTime = 0;
+      tasks[0].TickFct = &DisplayTick ;
+
+      tasks[1].period = TASK2_PERIOD;
+      tasks[1].state = JOYSTICK_INIT;
+      tasks[1].elapsedTime = 0;
+      tasks[1].TickFct = &JoystickTick;
+
+      // Add the Button task
+      tasks[2].period = TASK3_PERIOD; // Use the same period as other tasks
+      tasks[2].state = BUTTON_INIT;
+      tasks[2].elapsedTime = 0;
+      tasks[2].TickFct = &ButtonTick;
+
+      tasks[3].period = TASK3_PERIOD; // Use the same period as other tasks
+      tasks[3].state = BUZZER_IDLE;
+      tasks[3].elapsedTime = 0;
+      tasks[3].TickFct = &BuzzerTick;
+
+      tasks[4].period = TASK4_PERIOD; // Update this period as needed
+      tasks[4].state = SOUND_IDLE;
+      tasks[4].elapsedTime = 0;
+      tasks[4].TickFct = &SoundTick;
+
+
+
+
+
+    TimerSet(GCD_PERIOD);
+    TimerOn();
+
+    while (1) {}
+
+    return 0;
+}
